@@ -54,18 +54,99 @@ function userAgentsSkillsDir() {
   return path.join(agentsHome, 'skills')
 }
 
+/** The YAML frontmatter block of a SKILL.md body, or undefined when absent. */
+function frontmatterBlock(content) {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  return match === null ? undefined : match[1]
+}
+
 /** Parse a SKILL.md frontmatter block into a key/value map (flat YAML subset). */
 function parseFrontmatter(content) {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!match) return {}
+  const block = frontmatterBlock(content)
+  if (block === undefined) return {}
   const out = {}
-  for (const line of match[1].split(/\r?\n/)) {
+  for (const line of block.split(/\r?\n/)) {
     const kv = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
     if (!kv) continue
     const value = kv[2].trim().replace(/^["']|["']$/g, '')
     if (value !== '') out[kv[1]] = value
   }
   return out
+}
+
+/**
+ * Whether the frontmatter carries `key` at all, whatever its value.
+ * `parseFrontmatter` drops empty values, so presence checks that must also
+ * see a bare `key:` line go through here instead.
+ */
+function hasFrontmatterKey(content, key) {
+  const block = frontmatterBlock(content)
+  if (block === undefined) return false
+  return block.split(/\r?\n/).some((line) => {
+    const kv = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
+    return kv !== null && kv[1] === key
+  })
+}
+
+/**
+ * Legacy invocation spellings the official `dsh-skill-filesystem` provider
+ * rejects outright (`rejectLegacyInvocationKey`) — a skill carrying one is
+ * dropped from every surface, so the picker must drop it too.
+ */
+const LEGACY_INVOCATION_KEYS = ['disableModelInvocation', 'modelInvocable', 'userInvocable']
+
+/**
+ * Read a frontmatter boolean with the official provider's semantics: YAML
+ * booleans plus the case-insensitive `true`/`false`, `yes`/`no`, `on`/`off`
+ * and `1`/`0` forms. An absent key yields undefined ("surface permitted").
+ */
+function frontmatterBoolean(meta, key) {
+  if (!Object.hasOwn(meta, key)) return undefined
+  const value = meta[key]
+  if (typeof value === 'boolean') return value
+  if (value === 1 || value === '1') return true
+  if (value === 0 || value === '0') return false
+  if (typeof value === 'string') {
+    switch (value.toLowerCase()) {
+      case 'true':
+      case 'yes':
+      case 'on':
+        return true
+      case 'false':
+      case 'no':
+      case 'off':
+        return false
+    }
+  }
+  throw new TypeError(`frontmatter field "${key}" must be a boolean`)
+}
+
+/**
+ * Whether a scanned skill may be offered by the picker, i.e. whether it is
+ * user-invocable. Mirrors `parseInvocationPolicy` in
+ * `@deepseek-ai/dsh-skill-filesystem`: `user-invocable: false` keeps the skill
+ * out of human-facing commands, a rejected spelling or a legacy invocation key
+ * drops it entirely.
+ *
+ * Why this exists (issue #10): the official `skills/list` Remote filters with
+ * `isUserInvocable` before answering, but this host's own fallback scan read
+ * name/description only — so the picker offered skills the official `/` menu
+ * hides, and picking one inserted a `/name` gesture that `dsh-tool-skill` then
+ * refused to load (a silent no-op).
+ *
+ * @param meta - parsed frontmatter map.
+ * @param content - the raw SKILL.md body (legacy keys are detected on it).
+ */
+function isUserInvocableSkill(meta, content) {
+  for (const legacy of LEGACY_INVOCATION_KEYS) {
+    if (hasFrontmatterKey(content, legacy)) return false
+  }
+  try {
+    // Omitted → permitted; only an explicit `false` hides the skill.
+    return frontmatterBoolean(meta, 'user-invocable') !== false
+  } catch {
+    return false
+  }
 }
 
 /** Scan one skill directory into the map; never throws (missing dir is a no-op). */
@@ -88,6 +169,13 @@ async function scanSkillsDirInto(map, dir) {
       continue
     }
     const meta = parseFrontmatter(content)
+    // The picker is a human-facing surface, so honour the invocation policy:
+    // `user-invocable: false` (and the legacy spellings the official provider
+    // rejects) must never be offered. The official `skills/list` Remote filters
+    // the same way — without this the fallback route listed skills that the
+    // official `/` menu hides and that the `/name` gesture then refuses to load
+    // (issue #10).
+    if (!isUserInvocableSkill(meta, content)) continue
     // Later writes win, so project-level skills override same-named user skills.
     map.set(meta.name ?? entry.name, {
       name: meta.name ?? entry.name,

@@ -71,6 +71,19 @@ function saveUsage(usage) {
 }
 
 /**
+ * Whether a skill entry may be offered by a human-facing surface (this panel
+ * and the `/` completion it feeds). The official `skills/list` DTO
+ * (`SkillEntry`) carries only `modelInvocable` — the host has already filtered
+ * user-invocable skills out of it — but the registry summary nests both flags
+ * under `invocation`. Accept either shape and hide only an explicit `false`,
+ * so an omitted flag keeps the historical behaviour (issue #10).
+ */
+function isUserFacingSkill(skill) {
+  const flag = skill?.userInvocable ?? skill?.invocation?.userInvocable
+  return flag !== false
+}
+
+/**
  * Shared usage ordering — the single rule used by BOTH the ⚡ panel and the
  * `/` completion: last picked first, then most frequent, then by name.
  * A fresh copy is returned; the input array is untouched.
@@ -360,7 +373,7 @@ function SkillPickerButton(props) {
       const res = await fetch(`/dsh-skill-picker/skills${cwd}`, { headers: { accept: 'application/json' } })
       const json = await res.json()
       if (!json.ok) throw new Error(json.error || 'bad response')
-      setSkills(Array.isArray(json.skills) ? json.skills : [])
+      setSkills((Array.isArray(json.skills) ? json.skills : []).filter(isUserFacingSkill))
       setSource('host')
     } catch (cause) {
       setError(String(cause?.message ?? cause))
@@ -618,7 +631,10 @@ export function apply(ctx) {
     const { result } = await skills.list({ sessionId }, controller.signal)
     if (!result.ok) throw new Error(`skill.list failed: ${result.error?.code}: ${result.error?.message}`)
     const raw = result.value?.skills ?? []
-    return raw.map((skill) => ({ name: skill.name, description: skill.description ?? '' }))
+    // The host already filters user-invocable skills out of this payload; keep
+    // the guard here too so the panel can never offer a skill the official `/`
+    // menu hides, whatever shape a future kernel ships on the wire (issue #10).
+    return raw.filter(isUserFacingSkill).map((skill) => ({ name: skill.name, description: skill.description ?? '' }))
   }
 
   // Track the active session's workspace cwd for the host-route fallback.
@@ -663,7 +679,10 @@ export function apply(ctx) {
     // Mirror the ⚡ panel's ordering: pinned first, then recently/frequently
     // used skills, then the untouched rest — so both stay in sync.
     const fuzzyMatch = (skills, query = '') => {
-      const ordered = groupByPinned(skills, loadUsage(), loadPinned()).flatMap((group) => group.items)
+      // Same visibility rule as the ⚡ panel: never let the `/` list surface a
+      // skill the user may not invoke (issue #10).
+      const visible = (Array.isArray(skills) ? skills : []).filter(isUserFacingSkill)
+      const ordered = groupByPinned(visible, loadUsage(), loadPinned()).flatMap((group) => group.items)
       const q = String(query).trim().toLowerCase()
       if (q === '') return ordered
       // Rank by the ⚡ panel's exact order (pinned → recent → frequent → rest)

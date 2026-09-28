@@ -1,7 +1,9 @@
 /**
- * Regression tests for the skill scan (issue #6): a skill that lives behind a
- * symlink or a Windows junction must be listed exactly like a real directory,
- * and broken links must be skipped instead of throwing or hiding the entry.
+ * Regression tests for the skill scan: a skill that lives behind a symlink or a
+ * Windows junction must be listed exactly like a real directory (issue #6), and
+ * `user-invocable: false` skills must never be offered by the picker (issue
+ * #10) — the official `skills/list` Remote filters them, so the fallback scan
+ * has to agree or the panel offers gestures DSH then refuses to load.
  *
  * The scan reads its roots from `DSH_AGENTS_HOME` / `DSH_HOME`, so every test
  * runs against a throwaway home and never touches the real one.
@@ -127,5 +129,84 @@ test('project-level link skills are scanned when a cwd is given', async () => {
 
     const names = (await scanSkills(project)).map((skill) => skill.name)
     assert.deepEqual(names, ['project-skill', 'user-level'])
+  })
+})
+
+/** Write `<dir>/SKILL.md` with caller-supplied extra frontmatter lines. */
+async function writeSkillWithMeta(dir, name, lines) {
+  await mkdir(dir, { recursive: true })
+  const body = ['---', `name: ${name}`, `description: ${name} description`, ...lines, '---', '', `Body of ${name}.`, ''].join('\n')
+  await writeFile(path.join(dir, 'SKILL.md'), body, 'utf8')
+}
+
+test('hides a skill carrying `user-invocable: false` (issue #10)', async () => {
+  await withTempHome(async ({ agentsHome }) => {
+    const dir = path.join(agentsHome, 'skills')
+    await writeSkill(path.join(dir, 'visible'), 'visible')
+    await writeSkillWithMeta(path.join(dir, 'hidden'), 'hidden', ['user-invocable: false'])
+
+    assert.deepEqual((await scanSkills()).map((skill) => skill.name), ['visible'])
+  })
+})
+
+test('keeps a skill with `user-invocable: true` or with the key omitted', async () => {
+  await withTempHome(async ({ agentsHome }) => {
+    const dir = path.join(agentsHome, 'skills')
+    await writeSkillWithMeta(path.join(dir, 'explicit'), 'explicit', ['user-invocable: true'])
+    await writeSkill(path.join(dir, 'omitted'), 'omitted')
+
+    assert.deepEqual((await scanSkills()).map((skill) => skill.name), ['explicit', 'omitted'])
+  })
+})
+
+test('hides every accepted false spelling of `user-invocable`', async () => {
+  await withTempHome(async ({ agentsHome }) => {
+    const dir = path.join(agentsHome, 'skills')
+    // Same accepted forms as the official provider: YAML booleans plus the
+    // case-insensitive true/false, yes/no, on/off and 1/0 words.
+    const spellings = ['false', 'FALSE', 'False', 'no', 'No', 'off', 'OFF', '0']
+    for (const [index, value] of spellings.entries()) {
+      await writeSkillWithMeta(path.join(dir, `hidden-${index}`), `hidden-${index}`, [`user-invocable: ${value}`])
+    }
+    await writeSkillWithMeta(path.join(dir, 'yes'), 'yes', ['user-invocable: yes'])
+    await writeSkillWithMeta(path.join(dir, 'on'), 'on', ['user-invocable: on'])
+    await writeSkillWithMeta(path.join(dir, 'one'), 'one', ['user-invocable: 1'])
+
+    assert.deepEqual((await scanSkills()).map((skill) => skill.name), ['on', 'one', 'yes'])
+  })
+})
+
+test('drops a skill whose `user-invocable` value is not a boolean', async () => {
+  await withTempHome(async ({ agentsHome }) => {
+    const dir = path.join(agentsHome, 'skills')
+    await writeSkill(path.join(dir, 'fine'), 'fine')
+    // The official provider drops the whole skill rather than silently
+    // permitting the surface; the picker must not offer what `/` cannot load.
+    await writeSkillWithMeta(path.join(dir, 'bogus'), 'bogus', ['user-invocable: maybe'])
+
+    assert.deepEqual((await scanSkills()).map((skill) => skill.name), ['fine'])
+  })
+})
+
+test('drops a skill carrying a legacy invocation key', async () => {
+  await withTempHome(async ({ agentsHome }) => {
+    const dir = path.join(agentsHome, 'skills')
+    await writeSkill(path.join(dir, 'fine'), 'fine')
+    for (const [index, key] of ['userInvocable', 'modelInvocable', 'disableModelInvocation'].entries()) {
+      const name = `legacy-${index}`
+      await writeSkillWithMeta(path.join(dir, name), name, [`${key}: true`])
+    }
+
+    assert.deepEqual((await scanSkills()).map((skill) => skill.name), ['fine'])
+  })
+})
+
+test('`disable-model-invocation: true` keeps the skill user-invocable', async () => {
+  await withTempHome(async ({ agentsHome }) => {
+    const dir = path.join(agentsHome, 'skills')
+    // Model-facing exclusion is a different surface: `/` must still offer it.
+    await writeSkillWithMeta(path.join(dir, 'model-blocked'), 'model-blocked', ['disable-model-invocation: true'])
+
+    assert.deepEqual((await scanSkills()).map((skill) => skill.name), ['model-blocked'])
   })
 })
