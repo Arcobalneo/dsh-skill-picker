@@ -19,6 +19,8 @@ import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react
 import fuzzysort from 'fuzzysort'
 import { pinyin } from 'pinyin-pro'
 
+import { sessionIdOf, useWorkspaceCwd } from './session-view.js'
+
 /** Required services: slot registry, host connection (official skills API), sessions (workspace cwd fallback), input triggers (/ fuzzy source). */
 export const inject = ['slots', 'connection', 'sessions', 'inputTriggers']
 
@@ -355,11 +357,14 @@ function SkillPickerButton(props) {
 
   const load = useCallback(async () => {
     if (skills !== undefined || error !== undefined) return
+    // Session identity comes from the slot's standard props; older kernels
+    // carried it as `props.session` (see ./session-view.js).
+    const sessionId = sessionIdOf(props)
     try {
       // Primary path: the official host skills API (same source as DSH's own
       // `/` completion — session-scoped, covers user + project level).
-      if (typeof props.listSkills === 'function' && props.session?.sessionId !== undefined) {
-        const listed = await props.listSkills(props.session.sessionId)
+      if (typeof props.listSkills === 'function' && sessionId !== undefined) {
+        const listed = await props.listSkills(sessionId)
         setSkills(Array.isArray(listed) ? listed : [])
         setSource('official')
         return
@@ -378,7 +383,7 @@ function SkillPickerButton(props) {
     } catch (cause) {
       setError(String(cause?.message ?? cause))
     }
-  }, [skills, error, props.listSkills, props.session, props.cwd])
+  }, [skills, error, props.listSkills, props.sessionId, props.session, props.cwd])
 
   const toggle = () => {
     if (!open) {
@@ -637,27 +642,18 @@ export function apply(ctx) {
     return raw.filter(isUserFacingSkill).map((skill) => ({ name: skill.name, description: skill.description ?? '' }))
   }
 
-  // Track the active session's workspace cwd for the host-route fallback.
-  let currentCwd = ''
-  const syncCwd = () => {
-    try {
-      const snapshot = ctx.sessions.list.getSnapshot()
-      const sessionId = snapshot.current
-      const cwd = sessionId === undefined ? undefined : snapshot.byId[sessionId]?.cwd
-      currentCwd = typeof cwd === 'string' ? cwd : ''
-    } catch {
-      currentCwd = ''
-    }
-  }
-
-  syncCwd()
-  const unsubscribe = ctx.sessions.list.subscribe(syncCwd)
   ctx.effect(() => {
     // Wrap the component so framework props pass through untouched and the
     // live workspace cwd + official skills fetcher are attached — never
     // swallow the composed props.
+    //
+    // The cwd is read from the slot's own standard props (see
+    // ./session-view.js): the Session list snapshot has no "current" cursor
+    // since the 0.1.7 client, so resolving the active Session through
+    // `ctx.sessions.list` yielded `''` and the host fallback scan never
+    // received the workspace.
     const PickerWithCwd = (props) =>
-      React.createElement(SkillPickerButton, { ...props, cwd: currentCwd, listSkills })
+      React.createElement(SkillPickerButton, { ...props, cwd: useWorkspaceCwd(props), listSkills })
     const dispose = ctx.slots.inject('conversation.input.right', () =>
       ctx.slots.register(
         { name: 'conversation.input.right', id: 'skill-picker', order: 100, label: 'Skill picker' },
@@ -666,7 +662,6 @@ export function apply(ctx) {
     )
     return () => {
       dispose()
-      unsubscribe()
     }
   }, 'dsh-skill-picker: composer input slot')
 
