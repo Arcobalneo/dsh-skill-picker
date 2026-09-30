@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { reportUiSkillPatches } from '../src/index.js'
+import { reportUiSkillPatches } from '../src/host/slash-completion.js'
 
 /** Capture log/warn calls instead of writing to the real console. */
 function capture() {

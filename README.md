@@ -2,7 +2,7 @@
 
 > ## 🔧 本仓库是 fork：适配 DSH **0.2.0-rc.2**
 >
-> 上游 [a735624258/dsh-skill-picker](https://github.com/a735624258/dsh-skill-picker) 的 v0.5.12 **无法安装在 DSH 0.2.0-rc.2 上** —— 安装会被兼容性门禁**直接拒绝**（`installation rejected`），原因见下。本 fork（**v0.6.1**）完成了 0.2.0-rc.2 适配，并已在 macOS 桌面端实测通过。
+> 上游 [a735624258/dsh-skill-picker](https://github.com/a735624258/dsh-skill-picker) 的 v0.5.12 **无法安装在 DSH 0.2.0-rc.2 上** —— 安装会被兼容性门禁**直接拒绝**（`installation rejected`），原因见下。本 fork（**v0.7.0**）完成了 0.2.0-rc.2 适配并做过一次架构重构，已在 macOS 桌面端实测通过。
 >
 > ### 上游为什么装不上
 >
@@ -39,7 +39,7 @@
 >
 > ### 验证基线
 >
-> 构建 `node build.mjs` 通过且**二次构建逐字节可复现**、原有 `node --test` 25 个用例全绿；客户端 bundle 通过**真实加载器契约**模拟（只传 `require`，factory 自带 `module`/`exports`）——握手 `id: dsh-skill-picker`、`exports.inject` 正确、factory 可执行；隔离 profile 实测安装通过、宿主路由 `/dsh-skill-picker/skills` 返回 200、客户端半进入页面 boot graph 且 `client.js` 200；CDP 在真实页面上确认 ⚡ 按钮已渲染于输入框工具行。
+> 构建 `node build.mjs` 通过且**二次构建逐字节可复现**、`node --test` **98 个用例全绿**（其中 `test/client-bundle.test.mjs` 常驻地把产物放进**真实加载器契约**里求值——只传 `require`、factory 自带 `module`/`exports`，断言握手 `id: dsh-skill-picker`、`exports.apply`、`exports.inject`，以及产物不 `require` 任何 Node 内置模块）；隔离 profile 实测安装通过、宿主路由 `/dsh-skill-picker/skills` 返回 200、客户端半进入页面 boot graph 且 `client.js` 200；CDP 在真实页面上确认 ⚡ 按钮已渲染于输入框工具行。
 
 [![npm version](https://img.shields.io/npm/v/dsh-skill-picker.svg)](https://www.npmjs.com/package/dsh-skill-picker)
 [![license](https://img.shields.io/npm/l/dsh-skill-picker.svg)](https://github.com/a735624258/dsh-skill-picker/blob/main/LICENSE)
@@ -66,7 +66,7 @@ DSH Web GUI 的技能选择器：在输入框（composer）工具行右侧加一
 
 English: A skill picker for the DSH Web GUI — a button in the composer's right tool row opens a searchable list of installed skills; picking one inserts the official `/skill-name` gesture into the draft, so DSH's native user-invocation path loads the skill with your message.
 
-当前版本：**v0.6.1（本 fork）→ 适配 DSH 0.2.0-rc.2**。上游 v0.5.12 的功能全在（⚡ 面板、置顶分组、拼音搜索、相关度排序、`user-invocable` 过滤），另修掉 0.2.0-rc.2 上的兼容门禁与客户端/宿主 API 破坏，以及面板目录的**一次性缓存**（新装技能必须刷新页面才可见）；**`/` 菜单增强在桌面端不可用**（见顶部说明）。上游历史：**v0.5.12**（**修复 `user-invocable: false` 的技能未被隐藏**（issue #10）+ 修复全局安装下 `/` 补全增强静默失效（issue #7）+ ⚡ 面板**置顶分组** + `/` 补全**自动增强补丁** + 拼音搜索 + **搜索结果按匹配相关度排序**）
+当前版本：**v0.7.0（本 fork）→ 适配 DSH 0.2.0-rc.2**。上游 v0.5.12 的功能全在（⚡ 面板、置顶分组、拼音搜索、相关度排序、`user-invocable` 过滤），另修掉 0.2.0-rc.2 上的兼容门禁与客户端/宿主 API 破坏，以及面板目录的**一次性缓存**（新装技能必须刷新页面才可见）；**`/` 菜单增强在桌面端不可用**（见顶部说明）。上游历史：**v0.5.12**（**修复 `user-invocable: false` 的技能未被隐藏**（issue #10）+ 修复全局安装下 `/` 补全增强静默失效（issue #7）+ ⚡ 面板**置顶分组** + `/` 补全**自动增强补丁** + 拼音搜索 + **搜索结果按匹配相关度排序**）
 
 ## 为什么用它（vs 官方 `/` 补全）
 
@@ -143,16 +143,48 @@ DSH 的 [dsh-tool-skill](https://github.com/deepseek-ai/deepseek-harness) 在 `a
 本插件只补 UI 一层：
 
 ```
-[client]  ⚡ 按钮 → fetch('/dsh-skill-picker/skills')
-                    ↓
-[host]    扫描用户级 $DSH_HOME/skills + 项目级 <cwd>/.dsh/skills 等 → 技能目录（name + description）
-                    ↓
-[client]  点选 → inputActions.setDraft(draft + '/技能名 ')
-                    ↓
+[client]  ⚡ 按钮 → catalog.fetchCatalog(sessionId)
+                     ├─ 适配器 1  官方 remote.skills.list
+                     │             （与 DSH 内置 `/` 补全同源；需已 retain 且 open 的 Session）
+                     └─ 适配器 2  GET /dsh-skill-picker/skills?cwd=…
+                                   （本插件宿主路由；只要 cwd，Session 未就绪时仍能回答）
+                     ↓ 同一个 normalizer：name + description，并施加 user-invocable 策略
+[client]  点选 → draftWithPick() → inputActions.setDraft('… /技能名 ')
+                     ↓
 [DSH]     agent/pre-step 识别手势 → 自动加载技能 → 执行
 ```
 
-- client 半：注册到官方 `conversation.input.right` 插槽（composer 工具行、发送按钮左侧的控件位），**技能列表优先走官方宿主 skills API**（`remote.skills.list`——与 DSH 内置 `/` 补全同源，会话作用域，自动含用户级/项目级技能），失败时回退到 host 扫描路由；插入文本走框架输入机的 `inputActions.setDraft`（单一路径，撤销/草稿持久化自动处理）；最近/常用排序 + 拼音索引（`pinyin-pro`）在 client 侧生成，按技能缓存
+- **两个适配器，一个 seam。** 官方 Remote 需要「已 retain 且 `openState === 'open'`」的 Session，因此会在切会话/冷启动时拒绝；宿主路由只需要 `cwd`，这就是面板在 Session 未就绪时仍然能渲染的原因。两者必须返回**同一种** entry 形状、施加**同一条**策略——否则就会出现 issue #10 那类漂移（面板列出了官方 `/` 菜单隐藏的技能，点选后 `dsh-tool-skill` 静默拒载）。
+- **host 侧为什么自己扫目录而不用 `ctx.skills`。** 不是为了绕过官方实现，而是官方在 host 面根本没有这个能力：随包的 `dsh-web-app` 组合把基础层的 `skill-filesystem` 行 **`disabled: true`**（其原文注为 "presets own local discovery"），provider 只在 preset 作用域注册；`SkillRegistry.collectFresh()` 读的是 `[layers.global, ...layers.chainLayers(scope)]`，host 上下文不带 scope 时只看全局层，**拿不到任何本地技能**。要拿到就得借调用方 agent 的 preset scope 并 retain 一个活 Session——那会让这条**兜底**路由依赖它本来要兜住的会话状态。
+- client 半：注册到官方 `conversation.input.right` 插槽（composer 工具行、发送按钮左侧的控件位）；插入文本走框架输入机的 `inputActions.setDraft`（单一路径，撤销/草稿持久化自动处理）；排序与拼音索引在 client 侧生成，按技能缓存。
+
+## 源码结构
+
+重构后的边界（每个模块的**接口**都很窄，实现都藏在后面；术语见 [GLOSSARY.md](./GLOSSARY.md)）：
+
+```
+src/
+├── index.js                 宿主半组合根（73 行）：注入声明 + 挂路由 + 挂提示段 + 可选斜杠补丁
+├── route-path.js            两半之间的 HTTP 契约（路径字面量只有这一处）
+├── host/
+│   ├── skill-scan.js        scanSkills(cwd) —— 根目录 / 链接语义 / frontmatter / 调用策略，四件事一个接口
+│   ├── skills-route.js      createSkillsRoute({ scanSkills }) —— 扫描是注入的依赖
+│   ├── slash-completion.js  可选斜杠补丁 + 它的日志策略（reportUiSkillPatches）
+│   └── dir-entry.js         符号链接 / junction 的目录判定（scan 与补丁共用）
+└── client/
+    ├── index.jsx            浏览器半组合根（75 行）：只做装配
+    ├── catalog.js           createCatalog(...) —— 两个适配器 + 一个 normalizer + 回退策略
+    ├── selection.js         selectSkills(...) —— 排序 / 分组 / 拼音 / 相关度 / 截断，一个接口
+    ├── preferences.js       createPreferences(storage) —— 注入 storage，读损坏数据不抛
+    ├── draft.js             draftWithPick(draft, name) —— 手势规则，尾随空格是契约
+    ├── PickerButton.jsx     视图与交互状态机（不做取舍）
+    └── styles.js            样式常量
+```
+
+两条原则：
+
+1. **组合根只装配，不实现。** 两个 `index` 都从 300+ / 700+ 行降到 70 余行，改动落在它们身上时不会顺带碰到路由或渲染。
+2. **纯逻辑不碰 DOM、不碰全局。** `selection` / `preferences` / `draft` / `catalog` 都能被 `node --test` 直接加载，所以此前**完全没有测试面**的客户端行为现在可以在没有浏览器的情况下断言。
 
 ## 与官方 `/` 补全的关系（v0.4.0 起：增强，而非并列）
 
@@ -168,7 +200,26 @@ DSH 的 [dsh-tool-skill](https://github.com/deepseek-ai/deepseek-harness) 在 `a
 
 ## 更新日志
 
+- **v0.7.0（本 fork）**：**架构重构（行为保持）+ 测试面从 25 扩到 98**。动机是一次架构复盘：仓库 churn 最高、承载全部用户可见行为的 `src/client/index.jsx`（737 行、22/39 次提交）**一个测试都没有**，因为排序/分组/搜索/持久化都长在渲染体里，只能靠挂载 React 才够得着；两个宿主半入口也各自混着 4 类职责。重构按「深模块」原则做，不动外部行为：
+
+  ① **目录 seam 显式化**（`client/catalog.js`）。此前「人类可调用的技能目录」实现在三处、两种 entry 形状：官方 Remote、宿主扫描路由、宿主策略扫描。两个适配器各自 `map` 各自过滤，于是漂移——issue #10 就是这么来的（面板列出官方 `/` 菜单隐藏的技能，点选后 `dsh-tool-skill` 静默拒载）。现在 `createCatalog({ remote, sessions, cwdOf, fetch })` 只暴露 `fetchCatalog(sessionId, signal) → { skills, source }`，两个适配器（官方 Remote / 宿主路由）走**同一个 normalizer 与同一条 `user-invocable` 策略**，回退策略与 `source` 标签也收进这一个模块；渲染体里那串 try/catch 链消失。适配器的选择（`using` + `openState` 前置校验、子代理短路、abort 透传）逐条保留并有独立用例。
+
+  ② **选择核心成模块**（`client/selection.js`）。`rankByUsage` / `groupByPinned` / `matchRank` / 拼音文本 / 内联过滤管线合并为一个 `selectSkills({ skills, usage, pinned, query, limit }) → { visible, groups, showTitles }`。排序、分组、拼音、相关度、截断、"有查询就不画分组标题" 全部降为实现细节，**唯一接口就是测试面**，不需要 DOM。
+
+  ③ **依赖改为注入**（`client/preferences.js`）。原来 4 个几乎相同的 try/catch + JSON 函数各自去够 `localStorage` 全局，于是「JSON 损坏 / 存储被拒 / 配额写满 / 时钟」四种行为完全无法测试。现在 `createPreferences(storage)` 接受注入、默认安全解析页面 storage；`recordPick(usage, name, now)` 把时钟变成参数。
+
+  ④ **手势规则独立**（`client/draft.js`）。`draftWithPick(draft, name)` 把「尾随空格是 `/技能名` 能被官方正则识别的前提」这条契约单独成模块并加了测试——它此前只内联在 click 回调里，且已经回归过一次（v0.5.8 前的 draft 覆盖 bug）。
+
+  ⑤ **宿主半变组合根**（`index.js` 305 → 73 行）。frontmatter + 调用策略 + 根目录扫描 + 链接语义合并进 `host/skill-scan.js`，对外只有一个 `scanSkills(cwd)`；路由变成 `createSkillsRoute({ scanSkills })`（扫描是注入的）；补丁的日志策略 `reportUiSkillPatches` 移到 `host/slash-completion.js`（它本来就在描述那个模块的输出，此前却住在组合根里、还被测试从组合根导入）；组合根只声明装配。
+
+  ⑥ **跨半契约单点化**（`route-path.js`）。`/dsh-skill-picker/skills` 此前在两个半里各写了一遍字面量，改名会静默 404；现在只有一处。
+
+  ⑦ **补上验证基线**。新增 `test/client-bundle.test.mjs`：在**真实加载器契约**下（只传 `require`、factory 自带 `module`/`exports`）实际求值产物，断言握手 `id`、`exports.apply`、`exports.inject`，以及产物不 `require` 任何 Node 内置模块——这三条正是历史上把插件启动打挂过的三种错误形态。另新增 `test/scan-skills.test.mjs` 的**根优先级**用例（高优先级根覆盖同名技能），此前无覆盖。**25 → 98 个用例全绿，`node build.mjs` 二次构建逐字节一致。**
+
+  ⑧ **顺带清理**：移除了客户端那个永不触发的 `dsh-skill-picker:usage-updated` 监听器（v0.6.0 删掉生产者后已成死代码，全仓库无人 dispatch）。**未改动**斜杠补丁的行为——它的 `fuzzy-candidates` / `pick-tracking` 两个补丁注入的 `window.__dshSkillPickerFuzzy` / `__dshSkillPickerTrack` 全局在 v0.6.0 已无生产者，因此在可选路径上处于**静默空转**状态；这属于行为决策而非重构，留待单独处理，此处只记录事实。
+
 - **v0.6.1（本 fork）**：**修复「新装的技能在 ⚡ 面板里看不见，必须刷新页面」（上游遗留缺陷）**——`load()` 是个**一次性闸门**：`if (skills !== undefined || error !== undefined) return`，而 `skills` 全文件**只在取数成功时被写入、从没有任何地方重置回 `undefined`**。`conversation.input.right` 这个 entry 的寿命等于 composer（切会话/刷新页面才重挂载），所以**只要面板在当前页面被点开过一次，目录就被冻结在那一刻**：之后新装的技能无论关闭重开多少次都不会出现，唯一的解法是刷新页面。上游 v0.5.12 第 357 行是同一个闸门，本 fork 继承而来，不是 0.2.0-rc.2 适配引入的。对照：官方 `/` 菜单没有这个问题 —— 它有 `warm()` 按会话预热，并在 `agent-preset/selected` / `connection/reset` 上显式 `invalidate()`（目录按会话缓存 + single-flight）。既然宿主侧本来就永远是活的（`SkillRegistry.collectCache` 的失效链完整：文件系统 watcher `depth: 1` 会捕获新增技能目录的 `addDir` → `control.invalidate()` → `invalidateCache()` 清缓存并 `revision += 1`；而 watcher 异常时 `cacheable=false`、目录压根不进缓存），问题就纯在客户端这一层。修法四件事：① `load(force = false)`，`toggle()` 在 entry 已 settled 后传 `force` —— **每次打开都重新拉取**；首次仍是冷加载（显示「加载中…」），之后是后台刷新、旧列表继续渲染不闪空。② 刷新前先 `abortRef.current?.abort()` supersede 在途请求，快速关闭/重开不会让过期响应晚到覆盖新数据。③ 取数成功补 `setError(undefined)`，之前失败过的 entry 恢复后不再继续渲染错误态。④ **后台刷新失败只 `console.warn` 并保留当前列表**，不再把可用目录替换成「加载失败」；只有冷加载（或前次已失败的重试）才把错误暴露给用户。验证：`node build.mjs` 通过且**二次构建逐字节一致**、`node --test` 25/25 绿、客户端 bundle 通过真实加载器契约模拟（只传 `require`；握手 `id` 与 `exports.inject = ["slots","sessions","remote","remote.skills"]` 正确）、桌面端实测：装入 27 个全局技能后重开面板即见（不再需要刷新页面）
+——`load()` 是个**一次性闸门**：`if (skills !== undefined || error !== undefined) return`，而 `skills` 全文件**只在取数成功时被写入、从没有任何地方重置回 `undefined`**。`conversation.input.right` 这个 entry 的寿命等于 composer（切会话/刷新页面才重挂载），所以**只要面板在当前页面被点开过一次，目录就被冻结在那一刻**：之后新装的技能无论关闭重开多少次都不会出现，唯一的解法是刷新页面。上游 v0.5.12 第 357 行是同一个闸门，本 fork 继承而来，不是 0.2.0-rc.2 适配引入的。对照：官方 `/` 菜单没有这个问题 —— 它有 `warm()` 按会话预热，并在 `agent-preset/selected` / `connection/reset` 上显式 `invalidate()`（目录按会话缓存 + single-flight）。既然宿主侧本来就永远是活的（`SkillRegistry.collectCache` 的失效链完整：文件系统 watcher `depth: 1` 会捕获新增技能目录的 `addDir` → `control.invalidate()` → `invalidateCache()` 清缓存并 `revision += 1`；而 watcher 异常时 `cacheable=false`、目录压根不进缓存），问题就纯在客户端这一层。修法四件事：① `load(force = false)`，`toggle()` 在 entry 已 settled 后传 `force` —— **每次打开都重新拉取**；首次仍是冷加载（显示「加载中…」），之后是后台刷新、旧列表继续渲染不闪空。② 刷新前先 `abortRef.current?.abort()` supersede 在途请求，快速关闭/重开不会让过期响应晚到覆盖新数据。③ 取数成功补 `setError(undefined)`，之前失败过的 entry 恢复后不再继续渲染错误态。④ **后台刷新失败只 `console.warn` 并保留当前列表**，不再把可用目录替换成「加载失败」；只有冷加载（或前次已失败的重试）才把错误暴露给用户。验证：`node build.mjs` 通过且**二次构建逐字节一致**、`node --test` 25/25 绿、客户端 bundle 通过真实加载器契约模拟（只传 `require`；握手 `id` 与 `exports.inject = ["slots","sessions","remote","remote.skills"]` 正确）、桌面端实测：装入 27 个全局技能后重开面板即见（不再需要刷新页面）
 
 - **v0.6.0（本 fork）**：**适配 DSH 0.2.0-rc.2**。① peer 范围 `^0.1.0-rc.6` → `^0.2.0-rc.2`（旧声明被 0.2.0-rc.2 的兼容门禁**直接拒装**：`installation rejected`），并给这些宿主提供的 peer 加 `peerDependenciesMeta.optional` 以便脱离宿主构建（不影响门禁判定）。② `dsh.client.inject` 移除**已不存在的** `@deepseek-ai/dsh-client-runtime`，改为 `dsh-api-gateway` / `dsh-api-remotes` / `dsh-api-session-controller` / `dsh-client-ui-renderer` / `dsh-client-ui-session` / `dsh-client-ui-conversation`。③ 客户端半对齐 rc.2 契约：当前会话身份从 `ctx.sessions.list.getSnapshot().current`（**该字段已删除**）改为 slot 的 `sessionId` 标准 prop；技能取数从**并不存在的** `props.session` / `props.listSkills` / `props.cwd` 改为 `ctx.remote.skills.list()`（与官方 ui-skill 同一条路径）；修掉 `const { result } = await skills.list(...)` 的错误解构（Remote 直接返回 `RemoteResult`）。④ 补齐官方的 `sessions.using` retain + `openState === 'open'` 前置校验与子代理会话短路，避免注定失败的 RPC。⑤ 在途请求接入卸载时 abort。⑥ `ui-skill` 源码补丁在桌面端（签名只读 `app.asar`）**不可能生效**，改为默认关闭、`DSH_SKILL_PICKER_PATCH_SLASH=1` 显式开启；`src/client/index.jsx` 中依赖该补丁的 `window.__dshSkillPickerFuzzy` / `__dshSkillPickerTrack` 全局钩子一并移除。⑦ 移除已无引用的 `fuzzysort` 依赖。验证：`node build.mjs` 通过、`node --test` 25/25 绿、隔离 profile 安装通过 + 宿主路由 200 + 客户端半进入 boot graph + `client.js` 200、CDP 在真实页面确认 ⚡ 按钮渲染
 - **v0.5.12**：**修复 `user-invocable: false` 的技能仍出现在 ⚡ 面板（对应 issue #10）**——面板取数有两条路：① **官方宿主 API**（`remote.skills.list`）在**服务端就过滤好了**（`dsh-api-session-controller` 的 skill-catalog 里是 `.filter(isUserInvocable)`，且它的线上 DTO `SkillEntry` 只带 `modelInvocable`、**根本不带 `userInvocable`**）；② **本插件自己的兜底扫描路由**（`/dsh-skill-picker/skills`，面板底部显示「本地扫描」徽标那条）只读 `name` / `description`，**完全没读调用策略** —— 这就是 0.1.7 线（官方客户端 UI 包重构、兜底路径被触发）下面板会列出 `user-invocable: false` 技能的原因。**危害不止"多显示一条"**：点选后插入的 `/技能名` 手势会被 `dsh-tool-skill` 的 `!isUserInvocable(skill)` **静默跳过**——用户以为选中了，实际什么都没发生。修复：host 兜底扫描新增 `frontmatterBoolean()` / `isUserInvocableSkill()`，按官方 `dsh-skill-filesystem` 的 `parseInvocationPolicy` 完整对齐语义 —— 接受 YAML 布尔与**不分大小写**的 `true`/`false`、`yes`/`no`、`on`/`off`、`1`/`0`；**显式 `false` 不列出**；**非法拼写或遗留键（`userInvocable` / `modelInvocable` / `disableModelInvocation`）整条丢弃**（官方也是丢整条，而不是静默放行）；`disable-model-invocation: true` 只影响模型面，`/` 与面板照常列出。client 侧三个取数点（官方 API / 兜底 fetch / 喂给 `/` 的模糊匹配器）都加了 `isUserFacingSkill()` 守卫，同时认平铺 `userInvocable` 与嵌套 `invocation.userInvocable`，防内核将来更换协议形状。新增 6 个 `npm test` 回归用例：`user-invocable: false` 隐藏、`true`/省略保留、全部 false 拼写、非布尔值丢弃、遗留键丢弃、`disable-model-invocation: true` 仍列出
@@ -234,22 +285,8 @@ node --check lib/client.js
 > `loaded without registering "dsh-skill-picker" via __ModuleLoader__.load`。
 > 构建脚本（`build.mjs`）会通过 esbuild 的 banner/footer 自动注入这段握手。
 
-目录结构：
+目录结构见上文 [源码结构](#源码结构) 一节（模块边界与职责），本节只留构建与产物约定。
 
-```
-dsh-skill-picker/
-├── package.json        # dsh.bundle.patch + dsh.client 声明 + build script
-├── cordis.patch.yml    # bundle patch：把插件行插入 web profile
-├── build.mjs           # esbuild 构建：host ESM + client CJS(__ModuleLoader__握手)
-├── src/
-│   ├── index.js        # host 半源码：/dsh-skill-picker/skills 路由 + prompt section
-│   └── client/
-│       └── index.jsx   # client 半源码：conversation.input.right 插槽组件
-├── lib/                # 构建产物（勿手改，`npm run build` 生成）
-│   ├── index.js
-│   └── client.js
-└── README.md
-```
 
 ## 依赖
 

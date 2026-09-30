@@ -17,7 +17,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { uiSkillClientPaths } from '../src/patch-ui-skill.js'
+import { uiSkillClientPaths } from '../src/host/slash-completion.js'
 
 /** Windows needs a junction (no admin/developer mode); POSIX uses a dir link. */
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir'

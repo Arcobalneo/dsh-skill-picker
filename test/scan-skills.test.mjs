@@ -15,7 +15,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { scanSkills } from '../src/index.js'
+import { scanSkills } from '../src/host/skill-scan.js'
 
 /** Windows needs a junction (no admin/developer mode); POSIX uses a dir link. */
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir'
@@ -208,5 +208,44 @@ test('`disable-model-invocation: true` keeps the skill user-invocable', async ()
     await writeSkillWithMeta(path.join(dir, 'model-blocked'), 'model-blocked', ['disable-model-invocation: true'])
 
     assert.deepEqual((await scanSkills()).map((skill) => skill.name), ['model-blocked'])
+  })
+})
+
+// The four roots are scanned lowest-priority first so a higher-priority root
+// overwrites a same-named skill — the same precedence the official provider
+// resolves. Nothing asserted it before, so a reordered `skillRootsFor` would
+// have silently changed which description the picker shows.
+test('a higher-priority root wins a name collision', async () => {
+  await withTempHome(async ({ home, agentsHome, dshHome }) => {
+    const cwd = path.join(home, 'project')
+    // user-agents (500) < user-dsh (400) < project-agents (200) < project-dsh (100)
+    await writeSkill(path.join(agentsHome, 'skills', 'shared'), 'shared', 'from user-agents')
+    await writeSkill(path.join(dshHome, 'skills', 'shared'), 'shared', 'from user-dsh')
+    await writeSkill(path.join(cwd, '.agents', 'skills', 'shared'), 'shared', 'from project-agents')
+    await writeSkill(path.join(cwd, '.dsh', 'skills', 'shared'), 'shared', 'from project-dsh')
+
+    const withProject = await scanSkills(cwd)
+    assert.deepEqual(withProject, [{
+      name: 'shared',
+      description: 'from project-dsh',
+      path: path.join(cwd, '.dsh', 'skills', 'shared'),
+    }])
+  })
+})
+
+test('the remaining roots still apply once a collision is decided', async () => {
+  await withTempHome(async ({ home, agentsHome, dshHome }) => {
+    const cwd = path.join(home, 'project')
+    await writeSkill(path.join(agentsHome, 'skills', 'shared'), 'shared', 'from user-agents')
+    await writeSkill(path.join(dshHome, 'skills', 'shared'), 'shared', 'from user-dsh')
+    await writeSkill(path.join(cwd, '.agents', 'skills', 'only-project'), 'only-project')
+
+    // Without the project roots, the user-dsh copy (400) beats user-agents (500).
+    const userLevel = await scanSkills()
+    assert.deepEqual(userLevel.map((skill) => skill.description), ['from user-dsh'])
+
+    const withProject = await scanSkills(cwd)
+    assert.deepEqual(withProject.map((skill) => skill.name), ['only-project', 'shared'])
+    assert.equal(withProject.find((skill) => skill.name === 'shared').description, 'from user-dsh')
   })
 })
