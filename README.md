@@ -2,7 +2,7 @@
 
 > ## 🔧 本仓库是 fork：适配 DSH **0.2.0-rc.2**
 >
-> 上游 [a735624258/dsh-skill-picker](https://github.com/a735624258/dsh-skill-picker) 的 v0.5.12 **无法安装在 DSH 0.2.0-rc.2 上** —— 安装会被兼容性门禁**直接拒绝**（`installation rejected`），原因见下。本 fork（**v0.6.0**）完成了 0.2.0-rc.2 适配，并已在 macOS 桌面端实测通过。
+> 上游 [a735624258/dsh-skill-picker](https://github.com/a735624258/dsh-skill-picker) 的 v0.5.12 **无法安装在 DSH 0.2.0-rc.2 上** —— 安装会被兼容性门禁**直接拒绝**（`installation rejected`），原因见下。本 fork（**v0.6.1**）完成了 0.2.0-rc.2 适配，并已在 macOS 桌面端实测通过。
 >
 > ### 上游为什么装不上
 >
@@ -39,7 +39,7 @@
 >
 > ### 验证基线
 >
-> 构建 `node build.mjs` 通过、原有 `node --test` 25 个用例全绿；隔离 profile 实测安装通过、宿主路由 `/dsh-skill-picker/skills` 返回 200、客户端半进入页面 boot graph 且 `client.js` 200；CDP 在真实页面上确认 ⚡ 按钮已渲染于输入框工具行。
+> 构建 `node build.mjs` 通过且**二次构建逐字节可复现**、原有 `node --test` 25 个用例全绿；客户端 bundle 通过**真实加载器契约**模拟（只传 `require`，factory 自带 `module`/`exports`）——握手 `id: dsh-skill-picker`、`exports.inject` 正确、factory 可执行；隔离 profile 实测安装通过、宿主路由 `/dsh-skill-picker/skills` 返回 200、客户端半进入页面 boot graph 且 `client.js` 200；CDP 在真实页面上确认 ⚡ 按钮已渲染于输入框工具行。
 
 [![npm version](https://img.shields.io/npm/v/dsh-skill-picker.svg)](https://www.npmjs.com/package/dsh-skill-picker)
 [![license](https://img.shields.io/npm/l/dsh-skill-picker.svg)](https://github.com/a735624258/dsh-skill-picker/blob/main/LICENSE)
@@ -66,7 +66,7 @@ DSH Web GUI 的技能选择器：在输入框（composer）工具行右侧加一
 
 English: A skill picker for the DSH Web GUI — a button in the composer's right tool row opens a searchable list of installed skills; picking one inserts the official `/skill-name` gesture into the draft, so DSH's native user-invocation path loads the skill with your message.
 
-当前版本：**v0.6.0（本 fork）→ 适配 DSH 0.2.0-rc.2**。上游 v0.5.12 的功能全在（⚡ 面板、置顶分组、拼音搜索、相关度排序、`user-invocable` 过滤），另修掉 0.2.0-rc.2 上的兼容门禁与客户端/宿主 API 破坏；**`/` 菜单增强在桌面端不可用**（见顶部说明）。上游历史：**v0.5.12**（**修复 `user-invocable: false` 的技能未被隐藏**（issue #10）+ 修复全局安装下 `/` 补全增强静默失效（issue #7）+ ⚡ 面板**置顶分组** + `/` 补全**自动增强补丁** + 拼音搜索 + **搜索结果按匹配相关度排序**）
+当前版本：**v0.6.1（本 fork）→ 适配 DSH 0.2.0-rc.2**。上游 v0.5.12 的功能全在（⚡ 面板、置顶分组、拼音搜索、相关度排序、`user-invocable` 过滤），另修掉 0.2.0-rc.2 上的兼容门禁与客户端/宿主 API 破坏，以及面板目录的**一次性缓存**（新装技能必须刷新页面才可见）；**`/` 菜单增强在桌面端不可用**（见顶部说明）。上游历史：**v0.5.12**（**修复 `user-invocable: false` 的技能未被隐藏**（issue #10）+ 修复全局安装下 `/` 补全增强静默失效（issue #7）+ ⚡ 面板**置顶分组** + `/` 补全**自动增强补丁** + 拼音搜索 + **搜索结果按匹配相关度排序**）
 
 ## 为什么用它（vs 官方 `/` 补全）
 
@@ -167,6 +167,8 @@ DSH 的 [dsh-tool-skill](https://github.com/deepseek-ai/deepseek-harness) 在 `a
 > 手动兜底（旧流程，一般不需要）：把官方包拷到 `profiles/web/local/dsh-client-ui-skill/`（`lib/client.js` 改 candidates 为 `window.__dshSkillPickerFuzzy` 优先、`order` 改 `-1`），profile package.json 加依赖 `"@deepseek-ai/dsh-client-ui-skill": "link:C:/Users/<user>/.dsh/profiles/web/local/dsh-client-ui-skill"`，`pnpm install` 后重启 DSH。自动补丁对 local 副本与 npm 安装两种形态都适用，升级后自愈，无需重复手动操作。
 
 ## 更新日志
+
+- **v0.6.1（本 fork）**：**修复「新装的技能在 ⚡ 面板里看不见，必须刷新页面」（上游遗留缺陷）**——`load()` 是个**一次性闸门**：`if (skills !== undefined || error !== undefined) return`，而 `skills` 全文件**只在取数成功时被写入、从没有任何地方重置回 `undefined`**。`conversation.input.right` 这个 entry 的寿命等于 composer（切会话/刷新页面才重挂载），所以**只要面板在当前页面被点开过一次，目录就被冻结在那一刻**：之后新装的技能无论关闭重开多少次都不会出现，唯一的解法是刷新页面。上游 v0.5.12 第 357 行是同一个闸门，本 fork 继承而来，不是 0.2.0-rc.2 适配引入的。对照：官方 `/` 菜单没有这个问题 —— 它有 `warm()` 按会话预热，并在 `agent-preset/selected` / `connection/reset` 上显式 `invalidate()`（目录按会话缓存 + single-flight）。既然宿主侧本来就永远是活的（`SkillRegistry.collectCache` 的失效链完整：文件系统 watcher `depth: 1` 会捕获新增技能目录的 `addDir` → `control.invalidate()` → `invalidateCache()` 清缓存并 `revision += 1`；而 watcher 异常时 `cacheable=false`、目录压根不进缓存），问题就纯在客户端这一层。修法四件事：① `load(force = false)`，`toggle()` 在 entry 已 settled 后传 `force` —— **每次打开都重新拉取**；首次仍是冷加载（显示「加载中…」），之后是后台刷新、旧列表继续渲染不闪空。② 刷新前先 `abortRef.current?.abort()` supersede 在途请求，快速关闭/重开不会让过期响应晚到覆盖新数据。③ 取数成功补 `setError(undefined)`，之前失败过的 entry 恢复后不再继续渲染错误态。④ **后台刷新失败只 `console.warn` 并保留当前列表**，不再把可用目录替换成「加载失败」；只有冷加载（或前次已失败的重试）才把错误暴露给用户。验证：`node build.mjs` 通过且**二次构建逐字节一致**、`node --test` 25/25 绿、客户端 bundle 通过真实加载器契约模拟（只传 `require`；握手 `id` 与 `exports.inject = ["slots","sessions","remote","remote.skills"]` 正确）、桌面端实测：装入 27 个全局技能后重开面板即见（不再需要刷新页面）
 
 - **v0.6.0（本 fork）**：**适配 DSH 0.2.0-rc.2**。① peer 范围 `^0.1.0-rc.6` → `^0.2.0-rc.2`（旧声明被 0.2.0-rc.2 的兼容门禁**直接拒装**：`installation rejected`），并给这些宿主提供的 peer 加 `peerDependenciesMeta.optional` 以便脱离宿主构建（不影响门禁判定）。② `dsh.client.inject` 移除**已不存在的** `@deepseek-ai/dsh-client-runtime`，改为 `dsh-api-gateway` / `dsh-api-remotes` / `dsh-api-session-controller` / `dsh-client-ui-renderer` / `dsh-client-ui-session` / `dsh-client-ui-conversation`。③ 客户端半对齐 rc.2 契约：当前会话身份从 `ctx.sessions.list.getSnapshot().current`（**该字段已删除**）改为 slot 的 `sessionId` 标准 prop；技能取数从**并不存在的** `props.session` / `props.listSkills` / `props.cwd` 改为 `ctx.remote.skills.list()`（与官方 ui-skill 同一条路径）；修掉 `const { result } = await skills.list(...)` 的错误解构（Remote 直接返回 `RemoteResult`）。④ 补齐官方的 `sessions.using` retain + `openState === 'open'` 前置校验与子代理会话短路，避免注定失败的 RPC。⑤ 在途请求接入卸载时 abort。⑥ `ui-skill` 源码补丁在桌面端（签名只读 `app.asar`）**不可能生效**，改为默认关闭、`DSH_SKILL_PICKER_PATCH_SLASH=1` 显式开启；`src/client/index.jsx` 中依赖该补丁的 `window.__dshSkillPickerFuzzy` / `__dshSkillPickerTrack` 全局钩子一并移除。⑦ 移除已无引用的 `fuzzysort` 依赖。验证：`node build.mjs` 通过、`node --test` 25/25 绿、隔离 profile 安装通过 + 宿主路由 200 + 客户端半进入 boot graph + `client.js` 200、CDP 在真实页面确认 ⚡ 按钮渲染
 - **v0.5.12**：**修复 `user-invocable: false` 的技能仍出现在 ⚡ 面板（对应 issue #10）**——面板取数有两条路：① **官方宿主 API**（`remote.skills.list`）在**服务端就过滤好了**（`dsh-api-session-controller` 的 skill-catalog 里是 `.filter(isUserInvocable)`，且它的线上 DTO `SkillEntry` 只带 `modelInvocable`、**根本不带 `userInvocable`**）；② **本插件自己的兜底扫描路由**（`/dsh-skill-picker/skills`，面板底部显示「本地扫描」徽标那条）只读 `name` / `description`，**完全没读调用策略** —— 这就是 0.1.7 线（官方客户端 UI 包重构、兜底路径被触发）下面板会列出 `user-invocable: false` 技能的原因。**危害不止"多显示一条"**：点选后插入的 `/技能名` 手势会被 `dsh-tool-skill` 的 `!isUserInvocable(skill)` **静默跳过**——用户以为选中了，实际什么都没发生。修复：host 兜底扫描新增 `frontmatterBoolean()` / `isUserInvocableSkill()`，按官方 `dsh-skill-filesystem` 的 `parseInvocationPolicy` 完整对齐语义 —— 接受 YAML 布尔与**不分大小写**的 `true`/`false`、`yes`/`no`、`on`/`off`、`1`/`0`；**显式 `false` 不列出**；**非法拼写或遗留键（`userInvocable` / `modelInvocable` / `disableModelInvocation`）整条丢弃**（官方也是丢整条，而不是静默放行）；`disable-model-invocation: true` 只影响模型面，`/` 与面板照常列出。client 侧三个取数点（官方 API / 兜底 fetch / 喂给 `/` 的模糊匹配器）都加了 `isUserFacingSkill()` 守卫，同时认平铺 `userInvocable` 与嵌套 `invocation.userInvocable`，防内核将来更换协议形状。新增 6 个 `npm test` 回归用例：`user-invocable: false` 隐藏、`true`/省略保留、全部 false 拼写、非布尔值丢弃、遗留键丢弃、`disable-model-invocation: true` 仍列出
