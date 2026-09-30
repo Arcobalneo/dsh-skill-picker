@@ -1,5 +1,46 @@
 # dsh-skill-picker
 
+> ## 🔧 本仓库是 fork：适配 DSH **0.2.0-rc.2**
+>
+> 上游 [a735624258/dsh-skill-picker](https://github.com/a735624258/dsh-skill-picker) 的 v0.5.12 **无法安装在 DSH 0.2.0-rc.2 上** —— 安装会被兼容性门禁**直接拒绝**（`installation rejected`），原因见下。本 fork（**v0.6.0**）完成了 0.2.0-rc.2 适配，并已在 macOS 桌面端实测通过。
+>
+> ### 上游为什么装不上
+>
+> DSH 0.2.0-rc.2 引入了硬兼容门禁：在 profile 组合时校验 `package.json` 里所有 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的 `peerDependencies`，用 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 判定；不满足就把该插件行 `disabled = true`，**安装阶段即被拒绝**。而 desktop 的内置包全部是 lockstep 的 `0.2.0-rc.2`，`^0.1.0-rc.6` 在 0.x 语义下等于 `>=0.1.0-rc.6 <0.2.0`，**不含 0.2.0** —— 所以旧 peer 声明一律被拦。
+>
+> ### 本 fork 改了什么
+>
+> | # | 问题（0.2.0-rc.2 的真实情况） | 修法 |
+> |---|---|---|
+> | 1 | peer 全写 `^0.1.0-rc.6` → 门禁拒装 | 改为 `^0.2.0-rc.2`；并加 `peerDependenciesMeta.optional`（这些包由宿主提供，**不影响门禁判定**） |
+> | 2 | `dsh.client.inject` 首项 `@deepseek-ai/dsh-client-runtime` **在 0.1.1-rc.2 之后已被移除**，rc.2 不存在该包 | 换成真正提供服务且存在的包：`dsh-api-gateway` / `dsh-api-remotes` / `dsh-api-session-controller` / `dsh-client-ui-renderer` / `dsh-client-ui-session` / `dsh-client-ui-conversation` |
+> | 3 | 读 `ctx.sessions.list.getSnapshot().current` —— rc.2 的 `SessionListState` 只有 `{ ids, byId, phase, projectionsBySession }`，**没有 `current`** | 当前会话身份改从 slot 的 `sessionId` 标准 prop 取（`dsh-client-ui-session` 的 scope adapter 注入） |
+> | 4 | 读 `props.session` / `props.listSkills` / `props.cwd` —— **这三个 prop 在 rc.2 全库不存在**（`conversation.input.right` 的 owner props 恒为 `{}`）→ 官方 API 主路径实际是死的，一直悄悄落回本地扫描兜底 | `props.sessionId` + 插件根 ctx 上的 `ctx.remote.skills` |
+> | 5 | `const { result } = await skills.list(...)` —— Remote 直接返回 `RemoteResult`，没有外层 | 改为 `const result = await skills.list({ sessionId }, signal)` |
+> | 6 | 缺官方的前置校验：Remote 要求会话**已被 retain** 且 `openState === 'open'` | 对齐官方 ui-skill：`ctx.sessions.using(...)` 持有引用 + `openState` 检查；子代理会话直接返回 `[]` |
+> | 7 | `AbortController` 从不 abort | 传入调用方 signal，卸载时取消在途请求 |
+> | 8 | `ui-skill` 源码补丁在 desktop 上**物理不可能生效**（官方 bundle 在签名只读的 `app.asar` 内，即上游 issue #7） | 默认**不再**安装该补丁；需要时用 `DSH_SKILL_PICKER_PATCH_SLASH=1` 显式打开（适用于 npm/pnpm 安装、官方 bundle 确为可写文件的场景） |
+>
+> ### ⚠️ 能力取舍：`/` 菜单增强在 desktop 上不可用
+>
+> 上游靠**改写官方 `ui-skill` 的 `client.js`** 来升级 `/` 的匹配（模糊 + 拼音）。这一招在 DSH 桌面端做不到 —— 那些 bundle 在**签名只读的 `app.asar`** 里；而官方唯一扩展点 `ctx.inputTriggers.registerSource()` **只能新增一个并列候选组**（同一 trigger 下 name 必须唯一，重名直接 throw），无法替换或增强官方那组。
+>
+> 所以本 fork 在 0.2.0-rc.2 上：**⚡ 面板完整可用；`/` 菜单保持官方原样。** 这是平台限制，不是配置问题。
+>
+> ### 安装本 fork
+>
+> ```sh
+> git clone git@github.com:Arcobalneo/dsh-skill-picker.git
+> cd dsh-skill-picker && npm install --legacy-peer-deps && node build.mjs
+> dsh plugin --profile desktop add "file:$PWD"   # 桌面端 profile 名是 desktop（不是 web）
+> ```
+>
+> 装完**刷新页面**即可（无需重启宿主进程 —— 已实测：客户端模块表随页面请求从实时组合重算）。
+>
+> ### 验证基线
+>
+> 构建 `node build.mjs` 通过、原有 `node --test` 25 个用例全绿；隔离 profile 实测安装通过、宿主路由 `/dsh-skill-picker/skills` 返回 200、客户端半进入页面 boot graph 且 `client.js` 200；CDP 在真实页面上确认 ⚡ 按钮已渲染于输入框工具行。
+
 [![npm version](https://img.shields.io/npm/v/dsh-skill-picker.svg)](https://www.npmjs.com/package/dsh-skill-picker)
 [![license](https://img.shields.io/npm/l/dsh-skill-picker.svg)](https://github.com/a735624258/dsh-skill-picker/blob/main/LICENSE)
 
@@ -9,16 +50,15 @@
 
 > 🤖 **给 AI/安装助手的提示（按优先级执行，保证装到最新版）**：
 >
-> 1. **要最新版 / 不确定版本 → 走 GitHub 直装**。git 依赖直接拉 GitHub 最新 commit，**完全不受 npm `minimumReleaseAge` 24h 门禁影响，百分百新版**：
->    ```sh
->    dsh plugin --profile web add "git+ssh://git@github.com:a735624258/dsh-skill-picker.git"
->    ```
-> 2. **要 npm 正式版** → 先查最新版本号，再**指定版本**安装（禁止裸名）：
->    ```sh
->    npm view dsh-skill-picker version   # 例如 0.5.5
->    dsh plugin --profile web add dsh-skill-picker@0.5.5
->    ```
-> 3. ⚠️ **禁止执行裸名安装** `dsh plugin --profile web add dsh-skill-picker`：新版本发布后 **24 小时内**会被 pnpm `minimumReleaseAge` 门禁拦截并**自动落回旧版**——照着上面两条走就永远不会装错。
+> ⚠️ **本 fork 请从本仓库安装。** npm registry 上的 `dsh-skill-picker` 是**上游**包（最新 0.5.12），**不含** 0.2.0-rc.2 适配，装到 0.2.0-rc.2 会被门禁拒装。
+>
+> ```sh
+> git clone git@github.com:Arcobalneo/dsh-skill-picker.git
+> cd dsh-skill-picker && npm install --legacy-peer-deps && node build.mjs
+> dsh plugin --profile desktop add "file:$PWD"    # 桌面端；web 端用 --profile web
+> ```
+>
+> 装完**刷新页面**即可（无需重启宿主进程）。无需发布 npm，也**不要**执行 `dsh plugin add dsh-skill-picker`（那会装到上游包）。
 
 一条命令装好并注入 DSH web profile，重启 `dsh web`（或刷新页面）即生效。HTTPS clone 受限时用 SSH 形式（见下文 [安装](#安装) 的网络特例）。
 
@@ -26,7 +66,7 @@ DSH Web GUI 的技能选择器：在输入框（composer）工具行右侧加一
 
 English: A skill picker for the DSH Web GUI — a button in the composer's right tool row opens a searchable list of installed skills; picking one inserts the official `/skill-name` gesture into the draft, so DSH's native user-invocation path loads the skill with your message.
 
-当前版本：**v0.5.12**（**修复 `user-invocable: false` 的技能未被隐藏**（issue #10）+ 修复全局安装下 `/` 补全增强静默失效（issue #7）+ ⚡ 面板**置顶分组** + `/` 补全**自动增强补丁** + 拼音搜索 + **搜索结果按匹配相关度排序**）
+当前版本：**v0.6.0（本 fork）→ 适配 DSH 0.2.0-rc.2**。上游 v0.5.12 的功能全在（⚡ 面板、置顶分组、拼音搜索、相关度排序、`user-invocable` 过滤），另修掉 0.2.0-rc.2 上的兼容门禁与客户端/宿主 API 破坏；**`/` 菜单增强在桌面端不可用**（见顶部说明）。上游历史：**v0.5.12**（**修复 `user-invocable: false` 的技能未被隐藏**（issue #10）+ 修复全局安装下 `/` 补全增强静默失效（issue #7）+ ⚡ 面板**置顶分组** + `/` 补全**自动增强补丁** + 拼音搜索 + **搜索结果按匹配相关度排序**）
 
 ## 为什么用它（vs 官方 `/` 补全）
 
@@ -57,6 +97,8 @@ English: A skill picker for the DSH Web GUI — a button in the composer's right
 
 ## 安装
 
+> 本节为**上游**说明，命令里的仓库与 npm 包名指向上游；本 fork 请用文首给的方式（clone 本仓库 + `file:` 安装）。下面方式一换成 `Arcobalneo/dsh-skill-picker` 同样适用；**方式三（npm）不适用于本 fork**。
+
 ```sh
 # 方式一：GitHub 克隆 + link（推荐，无需发布 npm）
 git clone https://github.com/a735624258/dsh-skill-picker.git
@@ -83,7 +125,7 @@ dsh plugin --profile web add dsh-skill-picker@0.5.4
   （或先执行 `git config --global url."git@github.com:".insteadOf "https://github.com/"` 让 pnpm 走 SSH）
 - 方式三新版本发布后 **24 小时内**裸名会被 pnpm 的 minimumReleaseAge 门禁挡到旧版（如装到 0.2.0）；急用最新请指定版本：`dsh plugin --profile web add dsh-skill-picker@0.3.1`
 
-重启 `dsh web`（或刷新页面加载新 bundle）后生效。
+安装后**刷新页面**即生效（客户端模块表随页面请求从实时组合重算，已实测无需重启宿主进程）。
 
 ## 用法
 
@@ -114,6 +156,8 @@ DSH 的 [dsh-tool-skill](https://github.com/deepseek-ai/deepseek-harness) 在 `a
 
 ## 与官方 `/` 补全的关系（v0.4.0 起：增强，而非并列）
 
+> ⚠️ **本节描述的 `/` 增强在 DSH 0.2.0-rc.2 桌面端不可用。** 它依赖改写官方 `ui-skill` 的 `client.js`，而桌面端的官方 bundle 在签名只读的 `app.asar` 内；官方扩展点 `registerSource()` 又只能新增并列组、无法替换官方那组。本 fork 因此**默认不安装该补丁**（`DSH_SKILL_PICKER_PATCH_SLASH=1` 可为可写安装显式打开）。下面保留上游原文，供 npm/pnpm 场景参考。
+
 **v0.2.0–0.3.4**：插件注册了一个独立的 `/` 候选源（`skill-fuzzy`），与官方 ui-skill 源**并列**——菜单里出现两个技能分组，搜索行为相互独立（冲突风险、视觉重复）。
 
 **v0.4.0 起**：**不再注册平行源**。改为给官方 `@deepseek-ai/dsh-client-ui-skill` 包的 candidates **打补丁**——其候选逻辑从 `skill.name.startsWith(query)`（前缀匹配）换成调用插件注入的全局函数 `window.__dshSkillPickerFuzzy`（fuzzysort 模糊 + pinyin-pro 拼音 + 最近/常用排行，与 ⚡ 面板同一套规则）。**v0.5.1 起，补丁由 host 端每次启动自动应用**（另加 `order: 2→-1`：技能组排在命令组之上），首次修改前自动备份 `.bak`，DSH 升级覆盖官方包后自动重打——**安装插件即生效，无需手动操作**。
@@ -124,6 +168,7 @@ DSH 的 [dsh-tool-skill](https://github.com/deepseek-ai/deepseek-harness) 在 `a
 
 ## 更新日志
 
+- **v0.6.0（本 fork）**：**适配 DSH 0.2.0-rc.2**。① peer 范围 `^0.1.0-rc.6` → `^0.2.0-rc.2`（旧声明被 0.2.0-rc.2 的兼容门禁**直接拒装**：`installation rejected`），并给这些宿主提供的 peer 加 `peerDependenciesMeta.optional` 以便脱离宿主构建（不影响门禁判定）。② `dsh.client.inject` 移除**已不存在的** `@deepseek-ai/dsh-client-runtime`，改为 `dsh-api-gateway` / `dsh-api-remotes` / `dsh-api-session-controller` / `dsh-client-ui-renderer` / `dsh-client-ui-session` / `dsh-client-ui-conversation`。③ 客户端半对齐 rc.2 契约：当前会话身份从 `ctx.sessions.list.getSnapshot().current`（**该字段已删除**）改为 slot 的 `sessionId` 标准 prop；技能取数从**并不存在的** `props.session` / `props.listSkills` / `props.cwd` 改为 `ctx.remote.skills.list()`（与官方 ui-skill 同一条路径）；修掉 `const { result } = await skills.list(...)` 的错误解构（Remote 直接返回 `RemoteResult`）。④ 补齐官方的 `sessions.using` retain + `openState === 'open'` 前置校验与子代理会话短路，避免注定失败的 RPC。⑤ 在途请求接入卸载时 abort。⑥ `ui-skill` 源码补丁在桌面端（签名只读 `app.asar`）**不可能生效**，改为默认关闭、`DSH_SKILL_PICKER_PATCH_SLASH=1` 显式开启；`src/client/index.jsx` 中依赖该补丁的 `window.__dshSkillPickerFuzzy` / `__dshSkillPickerTrack` 全局钩子一并移除。⑦ 移除已无引用的 `fuzzysort` 依赖。验证：`node build.mjs` 通过、`node --test` 25/25 绿、隔离 profile 安装通过 + 宿主路由 200 + 客户端半进入 boot graph + `client.js` 200、CDP 在真实页面确认 ⚡ 按钮渲染
 - **v0.5.12**：**修复 `user-invocable: false` 的技能仍出现在 ⚡ 面板（对应 issue #10）**——面板取数有两条路：① **官方宿主 API**（`remote.skills.list`）在**服务端就过滤好了**（`dsh-api-session-controller` 的 skill-catalog 里是 `.filter(isUserInvocable)`，且它的线上 DTO `SkillEntry` 只带 `modelInvocable`、**根本不带 `userInvocable`**）；② **本插件自己的兜底扫描路由**（`/dsh-skill-picker/skills`，面板底部显示「本地扫描」徽标那条）只读 `name` / `description`，**完全没读调用策略** —— 这就是 0.1.7 线（官方客户端 UI 包重构、兜底路径被触发）下面板会列出 `user-invocable: false` 技能的原因。**危害不止"多显示一条"**：点选后插入的 `/技能名` 手势会被 `dsh-tool-skill` 的 `!isUserInvocable(skill)` **静默跳过**——用户以为选中了，实际什么都没发生。修复：host 兜底扫描新增 `frontmatterBoolean()` / `isUserInvocableSkill()`，按官方 `dsh-skill-filesystem` 的 `parseInvocationPolicy` 完整对齐语义 —— 接受 YAML 布尔与**不分大小写**的 `true`/`false`、`yes`/`no`、`on`/`off`、`1`/`0`；**显式 `false` 不列出**；**非法拼写或遗留键（`userInvocable` / `modelInvocable` / `disableModelInvocation`）整条丢弃**（官方也是丢整条，而不是静默放行）；`disable-model-invocation: true` 只影响模型面，`/` 与面板照常列出。client 侧三个取数点（官方 API / 兜底 fetch / 喂给 `/` 的模糊匹配器）都加了 `isUserFacingSkill()` 守卫，同时认平铺 `userInvocable` 与嵌套 `invocation.userInvocable`，防内核将来更换协议形状。新增 6 个 `npm test` 回归用例：`user-invocable: false` 隐藏、`true`/省略保留、全部 false 拼写、非布尔值丢弃、遗留键丢弃、`disable-model-invocation: true` 仍列出
 - **v0.5.11**：**修复「补丁已就位也每次启动都打印 `ui-skill patch report`」（对应 issue #8）**——`healUiSkillPatches()` 返回的 `report.files` 是**逐目标文件的报告数组**：只要扫描到 ≥1 个目标文件就有一项，与这一轮**是否真的改动过无关**；而打印守卫用的正是 `report.files.length > 0`，等于把「找到目标」当成了「发生了变更」，于是**补丁早已 up-to-date 也每次启动都打印一行** `[dsh-skill-picker] ui-skill patch report: {…}`。这行虽然只是 `console.log`，但形态上落在启动日志第一行、长得像告警，很容易被误判成插件出问题（#8 就是这么来的），还会淹没真正需要关注的 `noop` / `errors`。现在改为按「这一轮到底发生了什么」判定：① **已是最新且无错 → 完全安静**；② 仅在**确实改过文件**（`patched` 非空）时打印报告，且只报这一轮真正动过的文件 + 全部错误；③ **锚点未命中（`noop` 非空）单独 `console.warn`**——它的语义是「官方实现又换了形态、增强**没打上**」，与 issue #7 的静默失效同类，不能再被淹没；④ 新增 `DSH_SKILL_PICKER_LOG=debug` 显式开关，需要完整报告（含 `skipped`）时按需打开。新增 7 个 `npm test` 回归用例：已就位时静默、无目标不重复报、真改动打一行、`noop` 转 warn、仅错误转 warn、改动+错误合并一行、debug 开关
 - **v0.5.10**：**修复全局安装下 `/` 补全增强静默失效（对应 issue #7）**——`uiSkillClientPaths()` 原先只枚举两个位置：`profiles/<profile>/local/dsh-client-ui-skill` 与 `profiles/<profile>/node_modules/@deepseek-ai/dsh-client-ui-skill`。但用**全局 `npm i -g @deepseek-ai/dsh`** 安装时，官方包位于**共享根** `profiles/node_modules/@deepseek-ai/dsh-client-ui-skill`（`readdir(profiles)` 只会给出 `node_modules` 和 `web` 两个条目，两个候选**全部落空**），于是 `found = []`、**两个补丁一次都没跑**——而且**完全无声**：`{"files":[],"errors":[]}` 与「补丁都已应用、全部 skipped」在输出上一模一样，用户和排查者都看不出补丁根本没生效，表现成「插件一切正常、技能列表能用，**就是拼音/模糊搜索是坏的**」。修复四件事：① 候选新增**共享根**（不属于任何单个 profile，放在循环外采集）；② 每个 profile 额外走一次 Node 自身解析 `createRequire().resolve()` 兜底，未枚举到的布局也能命中（按 realpath 去重，不会重复打补丁）；③ 跳过 `profiles/node_modules` 这个假 profile 条目；④ **`found.length === 0` 时 `console.warn` 大声报出**——这个静默正是 issue #7 里最坑人的地方。另修写入方式：由原地 `writeFile` 改为**临时文件 + `rename`**——pnpm 安装的包是**硬链接**到共享内容寻址 store 的，原地写会连带改动 store 里的同一份（影响其他使用同版本的项目），`rename` 只替换目录项、不动共享 inode，顺带获得写入原子性（中断的启动不会留下半截文件）。新增 6 个 `npm test` 回归用例：共享根、profile local、profile node_modules、共享根+profile 去重、无任何安装、profiles 目录缺失
@@ -151,24 +196,30 @@ DSH 的 [dsh-tool-skill](https://github.com/deepseek-ai/deepseek-harness) 在 `a
 
 ## 兼容性与注意事项
 
-- **技能来源**：**优先走官方宿主 skills API**（`connection.api.skills.list`——与 DSH 内置 `/` 补全**完全同一个数据源**，会话作用域，自动覆盖全部官方目录）；官方 API 不可用时**自动回退**到内置扫描。两条路都支持 `DSH_HOME` 环境变量。
+- **技能来源**：**优先走官方宿主 skills API**（`ctx.remote.skills.list`——与 DSH 内置 `/` 补全**完全同一个数据源**，会话作用域，自动覆盖全部官方目录；rc.2 下对齐官方做 `sessions.using` retain + `openState` 前置校验）；官方 API 不可用时**自动回退**到内置扫描。两条路都支持 `DSH_HOME` 环境变量。
 - **兜底扫描范围**：与官方 `dsh-skill-filesystem` provider 的默认根完全同源——项目级 `<workspace>/.dsh/skills`、`<workspace>/.agents/skills`，用户级 `~/.dsh/skills`、`~/.agents/skills`（`$DSH_AGENTS_HOME` 可覆盖），同名时按官方 rank 项目级优先。走兜底时 ⚡ 面板底部显示「本地扫描」徽标。
 - **链接型技能**：技能目录里的**符号链接 / Junction**会被跟随读取（v0.5.9 起，对应 issue #6），链接型技能与普通目录一视同仁；断链、指向普通文件的链接静默跳过，不影响其它技能。
 - **暂不支持**：自定义技能目录（官方 `customSkillDirs` 配置）——需要的话欢迎 PR。
 - **失败保护**：client 端用 `ctx.slots.inject`（等 `conversation.input.right` 插槽声明存在才注册，插槽缺失时静默跳过，不会拖垮启动）；host 端路由 try/catch，扫描目录不存在时返回空列表而非报错。
-- **依赖版本**：按 DSH `0.1.0-rc.6` API 编写（cordis 4 / web profile 标准装配）。如遇 DSH 大版本更新导致 API 变化，插件会以启动日志的插件错误提示为准，卸载 `dsh plugin --profile web remove dsh-skill-picker` 即可回退。
+- **依赖版本**：本 fork 按 DSH **`0.2.0-rc.2`** API 编写并实测（cordis 4 / web + desktop profile 标准装配）。上游 v0.5.12 对应 `0.1.x`，在 0.2.0-rc.2 上会被兼容门禁拒装。如遇 DSH 大版本更新导致 API 变化，以启动日志的插件错误提示为准，卸载 `dsh plugin --profile desktop remove dsh-skill-picker` 即可回退。
+- **⚠️ `/` 菜单增强**：在 DSH 桌面端（官方 bundle 位于签名只读的 `app.asar`）不可用，本 fork 默认关闭该补丁；⚡ 面板不受影响。详见文首说明。
 
 ## 开发
 
 ```sh
-# 安装依赖（提供 esbuild / fuzzysort / pinyin-pro）
-npm install
+# 安装依赖（esbuild 构建用；pinyin-pro 会被打进 client bundle）
+# 注意 --legacy-peer-deps：@deepseek-ai/dsh-* 的 peer 由宿主提供，脱离宿主安装时
+# 无法解析，npm 默认会因此报 ERESOLVE 而失败。
+npm install --legacy-peer-deps
 
 # 构建（源码 src/ → 产物 lib/；client 半自动包 __ModuleLoader__ 握手）
 npm run build
 
-# 安装到 web profile（link 模式，改源码即生效）
-dsh plugin --profile web add link:$PWD
+# 跑回归测试
+npm test
+
+# 安装到 desktop profile（link 模式，改源码后重新 build 即生效）
+dsh plugin --profile desktop add link:$PWD
 
 # 语法自检（产物）
 node --check lib/index.js
@@ -201,7 +252,10 @@ dsh-skill-picker/
 ## 依赖
 
 - host：`@deepseek-ai/cordis`、`@deepseek-ai/dsh-host-webserver`、`@deepseek-ai/dsh-skill`、`@deepseek-ai/dsh-system-prompt`
-- client：`@deepseek-ai/dsh-client-runtime`、`@deepseek-ai/dsh-client-ui-slots`、`react`、`pinyin-pro`（拼音索引，打包进 client bundle）
+- client（0.2.0-rc.2）：`@deepseek-ai/dsh-api-gateway`（`remote` 服务）、`@deepseek-ai/dsh-api-remotes`（`remote.skills` 命名空间）、`@deepseek-ai/dsh-api-session-controller`（`sessions` 服务）、`@deepseek-ai/dsh-client-ui-renderer`（`slots` 服务）、`@deepseek-ai/dsh-client-ui-session`（注入 `sessionId` 等标准 props）、`@deepseek-ai/dsh-client-ui-conversation`（声明 `conversation.input.right` 并提供 `useInput` / `inputActions`）；运行时另有 `react`（宿主 seed word）与 `pinyin-pro`（拼音索引，打包进 client bundle）
+- 构建期：`esbuild`
+
+> 上游 v0.5.12 声明的 `@deepseek-ai/dsh-client-runtime` **在 0.1.1-rc.2 之后已被移除**，0.2.0-rc.2 不存在该包；`@deepseek-ai/dsh-client-ui-slots` 是宿主 seed word 而非插件图节点，写进 `dsh.client.inject` 会被静默忽略（`slots` 服务的提供者是 `dsh-client-ui-renderer`）。
 
 ## License
 

@@ -16,11 +16,15 @@
  */
 
 import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react'
-import fuzzysort from 'fuzzysort'
 import { pinyin } from 'pinyin-pro'
 
-/** Required services: slot registry, host connection (official skills API), sessions (workspace cwd fallback), input triggers (/ fuzzy source). */
-export const inject = ['slots', 'connection', 'sessions', 'inputTriggers']
+/**
+ * Required services (DSH 0.2.0-rc.2): the slot registry, the session catalog
+ * (workspace cwd for the fallback scan) and the generated `skills` Remote
+ * (`remote.skills` backs the official `skills/list` call, the same namespace
+ * the official ui-skill package consumes).
+ */
+export const inject = ['slots', 'sessions', 'remote', 'remote.skills']
 
 /** localStorage key for the picker's per-browser usage history. */
 const USAGE_KEY = 'dsh-skill-picker:usage'
@@ -325,60 +329,74 @@ function SkillPickerButton(props) {
   const [active, setActive] = useState(0)
   const boxRef = useRef(null)
   const itemRefs = useRef([])
+  const abortRef = useRef(undefined)
 
-  // The usage store is shared with the official `/` menu: picks made there go
-  // through window.__dshSkillPickerTrack (localStorage only). Refresh this
-  // panel's state from storage whenever that event fires, so a slash pick
-  // shows up as "recently used" here too — not just in the slash list.
   useEffect(() => {
     const onUsageUpdated = () => setUsage(loadUsage())
     window.addEventListener('dsh-skill-picker:usage-updated', onUsageUpdated)
     return () => window.removeEventListener('dsh-skill-picker:usage-updated', onUsageUpdated)
   }, [])
 
-  // Latest draft mirror: `useInput` is a selector hook and may only be called
-  // during render, while the pick handler runs from a click callback. Sync the
-  // store's current draft into a ref here (render time), so the click handler
-  // appends onto the REAL current draft instead of a stale snapshot. The
-  // owner-provided `input` snapshot is a secondary fallback only.
+  // Cancel an in-flight catalog fetch when this entry unmounts (Session switch,
+  // composer teardown, plugin disposal). The Remote carries the signal through
+  // to the transport, so a superseded fetch stops instead of landing late.
+  useEffect(() => () => abortRef.current?.abort(), [])
+
+  // Latest draft mirror: `useInput` is a framework selector hook — supplied for
+  // every session-scoped slot by `@deepseek-ai/dsh-client-ui-session` — while
+  // the pick handler runs from a click callback, so the live draft is read here
+  // during render and kept in a ref. Appending onto the store's REAL current
+  // draft is what keeps the pick from overwriting the user's typed text with a
+  // stale snapshot.
   const draftRef = useRef('')
-  if (typeof props.useInput === 'function') {
-    try {
-      const state = props.useInput((s) => s)
-      if (state !== undefined && typeof state.draft === 'string') draftRef.current = state.draft
-    } catch {
-      /* keep the last known draft */
-    }
-  } else if (props.input !== undefined && typeof props.input.draft === 'string') {
-    draftRef.current = props.input.draft
-  }
+  const inputState = typeof props.useInput === 'function' ? props.useInput((s) => s) : undefined
+  if (inputState !== undefined && typeof inputState.draft === 'string') draftRef.current = inputState.draft
 
   const load = useCallback(async () => {
     if (skills !== undefined || error !== undefined) return
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
       // Primary path: the official host skills API (same source as DSH's own
       // `/` completion — session-scoped, covers user + project level).
-      if (typeof props.listSkills === 'function' && props.session?.sessionId !== undefined) {
-        const listed = await props.listSkills(props.session.sessionId)
+      // `sessionId` arrives as a standard prop of a session-scoped slot
+      // (`@deepseek-ai/dsh-client-ui-session` merges it into
+      // `SessionStandardProps`); the pre-0.2 `props.session.sessionId` shape no
+      // longer exists on 0.2.0-rc.2.
+      if (typeof props.listSkills === 'function' && props.sessionId !== undefined) {
+        const listed = await props.listSkills(props.sessionId, controller.signal)
+        if (controller.signal.aborted) return
         setSkills(Array.isArray(listed) ? listed : [])
         setSource('official')
         return
       }
     } catch (cause) {
+      if (controller.signal.aborted) return
       console.warn('[dsh-skill-picker] official skills API failed, falling back to host route:', cause)
     }
     // Fallback path: the host's own scan route (official provider roots).
+    // The cwd is resolved lazily here (not at render time) so the scan always
+    // sees the Session's current workspace, and a project-level skill created
+    // after mount is still discovered.
     try {
-      const cwd = typeof props.cwd === 'string' && props.cwd !== '' ? `?cwd=${encodeURIComponent(props.cwd)}` : ''
-      const res = await fetch(`/dsh-skill-picker/skills${cwd}`, { headers: { accept: 'application/json' } })
+      const cwd = typeof props.cwdOf === 'function' && props.sessionId !== undefined
+        ? props.cwdOf(props.sessionId)
+        : ''
+      const query = typeof cwd === 'string' && cwd !== '' ? `?cwd=${encodeURIComponent(cwd)}` : ''
+      const res = await fetch(`/dsh-skill-picker/skills${query}`, {
+        headers: { accept: 'application/json' },
+        signal: controller.signal,
+      })
       const json = await res.json()
+      if (controller.signal.aborted) return
       if (!json.ok) throw new Error(json.error || 'bad response')
       setSkills((Array.isArray(json.skills) ? json.skills : []).filter(isUserFacingSkill))
       setSource('host')
     } catch (cause) {
+      if (controller.signal.aborted) return
       setError(String(cause?.message ?? cause))
     }
-  }, [skills, error, props.listSkills, props.session, props.cwd])
+  }, [skills, error, props.listSkills, props.sessionId, props.cwdOf])
 
   const toggle = () => {
     if (!open) {
@@ -615,122 +633,85 @@ function SkillPickerButton(props) {
   )
 }
 
+/**
+ * Read one Session's workspace cwd out of the client session catalog.
+ *
+ * DSH 0.2.0-rc.2 reshaped `SessionListState` to
+ * `{ ids, byId, phase, projectionsBySession }` — the pre-0.2 `current` field
+ * that named the active Session is gone, so the active identity now arrives as
+ * the slot's `sessionId` prop and only its catalog row is read here.
+ */
+function sessionCwd(ctx, sessionId) {
+  try {
+    const row = ctx.sessions.list.getSnapshot().byId?.[sessionId]
+    return typeof row?.cwd === 'string' ? row.cwd : ''
+  } catch {
+    return ''
+  }
+}
+
 /** Apply the browser half: register the picker into the composer tool row. */
 export function apply(ctx) {
-  // Primary skill source: the official host skills API. In DSH 0.1.2-alpha.x
-  // the RPC moved from `connection.api.skills` (rc.x) to `remote.skills`
-  // (used by the official ui-skill plugin); try both before falling back.
-  const listSkills = async (sessionId) => {
-    const remoteSkills = ctx.remote?.skills
-    const connectionSkills = ctx.connection?.api?.skills
-    const skills = remoteSkills ?? connectionSkills
+  // Primary skill source: the official generated `skills` Remote — the exact
+  // call the official ui-skill package makes for DSH's own `/` completion
+  // (`ctx.remote.skills.list({ sessionId }, signal)` resolving to
+  // `RemoteResult<{ skills }>`), so the picker lists what agents can load.
+  //
+  // `signal` is the caller's: it aborts the transport when the entry unmounts.
+  const listSkills = async (sessionId, signal) => {
+    const skills = ctx.remote?.skills
     if (skills === undefined || typeof skills.list !== 'function') {
-      throw new Error('skills RPC unavailable (remote.skills / connection.api.skills)')
+      throw new Error('skills Remote unavailable (ctx.remote.skills)')
     }
-    const controller = new AbortController()
-    const { result } = await skills.list({ sessionId }, controller.signal)
-    if (!result.ok) throw new Error(`skill.list failed: ${result.error?.code}: ${result.error?.message}`)
-    const raw = result.value?.skills ?? []
-    // The host already filters user-invocable skills out of this payload; keep
-    // the guard here too so the panel can never offer a skill the official `/`
-    // menu hides, whatever shape a future kernel ships on the wire (issue #10).
-    return raw.filter(isUserFacingSkill).map((skill) => ({ name: skill.name, description: skill.description ?? '' }))
+    // Addressed continuable children resolve no skill candidates locally: the
+    // Remote needs an attached Session, and viewing their persisted history
+    // must not activate them.
+    if (typeof ctx.sessions.subagentAddress === 'function'
+      && ctx.sessions.subagentAddress(sessionId) !== undefined) {
+      return []
+    }
+    const fetchCatalog = async () => {
+      const result = await skills.list({ sessionId }, signal)
+      if (!result.ok) throw new Error(`skills/list failed: ${result.error?.code}: ${result.error?.message}`)
+      // The host already filters user-invocable skills out of this payload;
+      // keep the guard here too so the panel can never offer a skill the
+      // official `/` menu hides, whatever shape a future kernel ships on the
+      // wire (issue #10).
+      return (result.value?.skills ?? [])
+        .filter(isUserFacingSkill)
+        .map((skill) => ({ name: skill.name, description: skill.description ?? '' }))
+    }
+    // The Remote requires an existing retained Session and waits for its
+    // initial history open to succeed before answering. `sessions.using` holds
+    // that reference only until the fetch settles, mirroring the official
+    // ui-skill package. When no reference can be acquired the call is rejected
+    // and the caller falls back to the host scan route.
+    if (typeof ctx.sessions.using === 'function' && typeof ctx.sessions.binding === 'function') {
+      return await ctx.sessions.using(sessionId, { source: 'skillPicker', signal }, async (reference) => {
+        const state = reference.binding.session.getSnapshot()
+        if (state.openState !== 'open') throw state.openError ?? new Error(`session "${sessionId}" is not open`)
+        return await fetchCatalog()
+      })
+    }
+    return await fetchCatalog()
   }
 
-  // Track the active session's workspace cwd for the host-route fallback.
-  let currentCwd = ''
-  const syncCwd = () => {
-    try {
-      const snapshot = ctx.sessions.list.getSnapshot()
-      const sessionId = snapshot.current
-      const cwd = sessionId === undefined ? undefined : snapshot.byId[sessionId]?.cwd
-      currentCwd = typeof cwd === 'string' ? cwd : ''
-    } catch {
-      currentCwd = ''
-    }
-  }
-
-  syncCwd()
-  const unsubscribe = ctx.sessions.list.subscribe(syncCwd)
+  // Wrap the component so framework props pass through untouched and the
+  // official skills fetcher plus a lazy cwd lookup are attached — never
+  // swallow the composed props.
   ctx.effect(() => {
-    // Wrap the component so framework props pass through untouched and the
-    // live workspace cwd + official skills fetcher are attached — never
-    // swallow the composed props.
-    const PickerWithCwd = (props) =>
-      React.createElement(SkillPickerButton, { ...props, cwd: currentCwd, listSkills })
-    const dispose = ctx.slots.inject('conversation.input.right', () =>
-      ctx.slots.register(
+    const dispose = ctx.slots.inject('conversation.input.right', () => {
+      const PickerWithCwd = (props) =>
+        React.createElement(SkillPickerButton, {
+          ...props,
+          listSkills,
+          cwdOf: (sessionId) => sessionCwd(ctx, sessionId),
+        })
+      return ctx.slots.register(
         { name: 'conversation.input.right', id: 'skill-picker', order: 100, label: 'Skill picker' },
         PickerWithCwd,
-      ),
-    )
-    return () => {
-      dispose()
-      unsubscribe()
-    }
+      )
+    })
+    return () => dispose()
   }, 'dsh-skill-picker: composer input slot')
-
-  // Fuzzy `/` completion: instead of registering a parallel source group
-  // (which would appear as a second list next to the official one), expose a
-  // global matcher that the patched official ui-skill candidates calls. The
-  // official group stays THE single `/` list; only its matching behaviour is
-  // upgraded to fuzzy + pinyin (name AND description, subsequence scoring).
-  ctx.effect(() => {
-    // Mirror the ⚡ panel's ordering: pinned first, then recently/frequently
-    // used skills, then the untouched rest — so both stay in sync.
-    const fuzzyMatch = (skills, query = '') => {
-      // Same visibility rule as the ⚡ panel: never let the `/` list surface a
-      // skill the user may not invoke (issue #10).
-      const visible = (Array.isArray(skills) ? skills : []).filter(isUserFacingSkill)
-      const ordered = groupByPinned(visible, loadUsage(), loadPinned()).flatMap((group) => group.items)
-      const q = String(query).trim().toLowerCase()
-      if (q === '') return ordered
-      // Rank by the ⚡ panel's exact order (pinned → recent → frequent → rest)
-      // so both lists stay in sync: fuzzysort only decides WHO matches, not
-      // the display order. Without this, a slash query re-sorts matches by
-      // match score and the two menus diverge for the same skill.
-      const rankByName = new Map(ordered.map((skill, index) => [skill.name, index]))
-      const targets = ordered.map((s) => ({
-        s,
-        search: `${s.name} ${s.description ?? ''} ${skillPinyinText(s.name, s.description ?? '')}`,
-      }))
-      const results = fuzzysort.go(q, targets, {
-        key: 'search',
-        limit: 30,
-        threshold: -10000,
-      })
-      // Relevance first (name-startsWith > name-contains > description >
-      // pinyin), then the ⚡ panel's pinned/usage order as the tiebreak —
-      // the shared rule with the bolt panel, so a name-exact skill like
-      // svg-diagram for "svg" surfaces above merely-recently-used ones.
-      return results
-        .filter((r) => r.score > 0)
-        .map((r) => r.obj.s)
-        // Drop pure subsequence noise (dispersed letters that never form an
-        // actual substring): keep only name/description/pinyin hits.
-        .filter((s) => matchRank(s, q) < 4)
-        .sort((a, b) => matchRank(a, q) - matchRank(b, q) || (rankByName.get(a.name) ?? 0) - (rankByName.get(b.name) ?? 0))
-    }
-    window.__dshSkillPickerFuzzy = fuzzyMatch
-    // Usage tracking for picks made from the official `/` menu: the patched
-    // ui-skill onPick calls this so a slash pick ranks like a bolt-panel pick.
-    const trackPick = (name) => {
-      const usage = loadUsage()
-      const nextUsage = { ...usage, [name]: { count: (usage[name]?.count ?? 0) + 1, lastUsed: Date.now() } }
-      saveUsage(nextUsage)
-      // Notify the bolt panel (and any other listeners) to re-read storage so
-      // a slash pick ranks as "recently used" there too, not only in the
-      // official / menu.
-      try {
-        window.dispatchEvent(new CustomEvent('dsh-skill-picker:usage-updated'))
-      } catch {
-        /* best-effort */
-      }
-    }
-    window.__dshSkillPickerTrack = trackPick
-    return () => {
-      if (window.__dshSkillPickerFuzzy === fuzzyMatch) delete window.__dshSkillPickerFuzzy
-      if (window.__dshSkillPickerTrack === trackPick) delete window.__dshSkillPickerTrack
-    }
-  }, 'dsh-skill-picker: fuzzy matcher for official / source')
 }

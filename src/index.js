@@ -280,19 +280,26 @@ export function apply(ctx) {
     text: SKILL_PICKER_GUIDANCE,
   }), 'dsh-skill-picker: prompt section')
 
-  // Self-healing patch for the official ui-skill package: keeps the `/`
-  // completion's skill group ordered above commands and its matching fuzzy
-  // across DSH upgrades. Runs once per boot; idempotent, backed up, and
-  // never allowed to take the host down.
+  // NOTE (DSH 0.2.0-rc.2 adaptation): the ui-skill source patch is NOT
+  // installed by default. It rewrote the official
+  // `@deepseek-ai/dsh-client-ui-skill` `client.js` on disk, which cannot work
+  // in the DSH desktop app — those bundles live inside the signed, read-only
+  // `app.asar` (upstream issue #7: "0 target client.js found").
   //
-  // Logging is gated on "did this boot change anything / fail" rather than
-  // "was a target found" — see `reportUiSkillPatches` (issue #8).
-  ctx.effect(() => {
-    healUiSkillPatches().then((report) => {
-      reportUiSkillPatches(report)
-    }).catch((error) => {
-      console.warn('[dsh-skill-picker] ui-skill patch failed:', error)
-    })
-    return () => {}
-  }, 'dsh-skill-picker: ui-skill self-heal patch')
+  // Consequence, stated plainly: on 0.2.0-rc.2 the `/` menu keeps its built-in
+  // prefix matching. This plugin provides the ⚡ picker, which is the supported
+  // surface (`conversation.input.right` + the official `skills/list` Remote).
+  //
+  // Set DSH_SKILL_PICKER_PATCH_SLASH=1 to opt back in for npm/pnpm installs
+  // where the official bundle really is a writable file on disk.
+  if (process.env.DSH_SKILL_PICKER_PATCH_SLASH === '1') {
+    ctx.effect(() => {
+      healUiSkillPatches().then((report) => {
+        reportUiSkillPatches(report)
+      }).catch((error) => {
+        console.warn('[dsh-skill-picker] ui-skill patch failed:', error)
+      })
+      return () => {}
+    }, 'dsh-skill-picker: ui-skill self-heal patch')
+  }
 }
