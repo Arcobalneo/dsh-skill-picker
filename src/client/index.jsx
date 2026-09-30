@@ -352,8 +352,15 @@ function SkillPickerButton(props) {
   const inputState = typeof props.useInput === 'function' ? props.useInput((s) => s) : undefined
   if (inputState !== undefined && typeof inputState.draft === 'string') draftRef.current = inputState.draft
 
-  const load = useCallback(async () => {
-    if (skills !== undefined || error !== undefined) return
+  const load = useCallback(async (force = false) => {
+    if (!force && (skills !== undefined || error !== undefined)) return
+    // A forced refresh runs on top of an already-settled entry, so remember
+    // whether a working catalog exists: a failed refresh must keep painting it
+    // rather than replace the list with the error panel.
+    const hadCatalog = skills !== undefined
+    // Supersede any in-flight fetch (rapid close/re-open) and keep `abortRef`
+    // pointing at the newest request so unmount still cancels the live one.
+    abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
     try {
@@ -368,6 +375,7 @@ function SkillPickerButton(props) {
         if (controller.signal.aborted) return
         setSkills(Array.isArray(listed) ? listed : [])
         setSource('official')
+        setError(undefined)
         return
       }
     } catch (cause) {
@@ -392,8 +400,16 @@ function SkillPickerButton(props) {
       if (!json.ok) throw new Error(json.error || 'bad response')
       setSkills((Array.isArray(json.skills) ? json.skills : []).filter(isUserFacingSkill))
       setSource('host')
+      setError(undefined)
     } catch (cause) {
       if (controller.signal.aborted) return
+      // Keep a working catalog through a failed background refresh. Only a cold
+      // load — or a forced retry while the previous attempt left an error — is
+      // allowed to surface the failure to the user.
+      if (hadCatalog) {
+        console.warn('[dsh-skill-picker] catalog refresh failed, keeping the current list:', cause)
+        return
+      }
       setError(String(cause?.message ?? cause))
     }
   }, [skills, error, props.listSkills, props.sessionId, props.cwdOf])
@@ -401,7 +417,11 @@ function SkillPickerButton(props) {
   const toggle = () => {
     if (!open) {
       setUsage(loadUsage())
-      void load()
+      // Refetch on every open. A skill installed while this entry stayed mounted
+      // (the entry lives as long as the composer does) must show up without a
+      // page reload. The first open is a cold load that paints "加载中…"; later
+      // opens refresh in the background while the current list stays visible.
+      void load(skills !== undefined || error !== undefined)
     }
     setOpen(!open)
   }
